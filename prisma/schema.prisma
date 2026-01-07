@@ -1,0 +1,227 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  name        String
+  price       Decimal  @db.Decimal(10, 2) // Dùng Decimal cho tiền tệ chính xác
+  description String?
+  
+  // Dành cho Source Code (Text dài vô hạn)
+  sourceCode  String?  @db.Text 
+  
+  // Dành cho File 3D (Lưu URL sau khi upload lên Cloud)
+  file3DUrl   String?
+  
+  category    String   // Ví dụ: "3D Model" hoặc "Source Code"
+  createdAt   DateTime @default(now())
+}
+
+model Purchase {
+  id        String   @id @default(uuid())
+  userId    String   // ID của user từ Clerk
+  productId Int
+  product   Product  @relation(fields: [productId], references: [id])
+  status    String   @default("PENDING") // PENDING (Chờ), COMPLETED (Đã thanh toán)
+  createdAt DateTime @default(now())
+  
+  @@unique([userId, productId]) // Một người chỉ cần mua 1 sản phẩm 1 lần
+}
+
+// Cập nhật lại model Product để có quan hệ ngược lại (tùy chọn, nhưng tốt cho việc tra cứu)
+model Product {
+  id          Int        @id @default(autoincrement())
+  // ... (các trường cũ giữ nguyên)
+  name        String
+  price       Decimal    @db.Decimal(10, 2)
+  description String?
+  sourceCode  String?    @db.Text 
+  file3DUrl   String?
+  category    String   
+  createdAt   DateTime   @default(now())
+  
+  purchases   Purchase[] // Thêm dòng này
+}
+Sau đó, chạy lệnh để cập nhật Database Neon:
+
+Bash
+
+npx prisma db push
+Bước 2: Tạo API Tạo Đơn hàng & Kiểm tra quyền sở hữu
+Tạo file src/app/api/purchase/route.js. API này xử lý việc "Khách bấm nút Mua" và "Xác nhận đã mua".
+
+JavaScript
+
+// src/app/api/purchase/route.js
+import { PrismaClient } from '@prisma/client';
+import { currentUser } from '@clerk/nextjs/server';
+import { NextResponse } from 'next/server';
+
+const prisma = new PrismaClient();
+
+export async function POST(request) {
+  const user = await currentUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { productId } = await request.json();
+
+  // 1. Kiểm tra xem đã mua chưa
+  const existingPurchase = await prisma.purchase.findUnique({
+    where: {
+      userId_productId: {
+        userId: user.id,
+        productId: parseInt(productId),
+      },
+    },
+  });
+
+  if (existingPurchase) {
+     // Nếu đã có đơn hàng nhưng chưa thanh toán -> Trả về đơn cũ để thanh toán tiếp
+     return NextResponse.json(existingPurchase);
+  }
+
+  // 2. Tạo đơn hàng mới (Trạng thái PENDING)
+  const newPurchase = await prisma.purchase.create({
+    data: {
+      userId: user.id,
+      productId: parseInt(productId),
+      status: 'PENDING', 
+    },
+  });
+
+  return NextResponse.json(newPurchase);
+}
+
+// API để Admin hoặc Hệ thống xác nhận đã thanh toán (Simulate)
+export async function PUT(request) {
+    const { purchaseId } = await request.json();
+    
+    // Trong thực tế, bạn sẽ cần check bảo mật ở đây (chỉ Admin hoặc Webhook ngân hàng mới gọi được)
+    // Ở bản Demo này, chúng ta cho phép Client gọi để test tính năng "Mua xong"
+    
+    const updated = await prisma.purchase.update({
+        where: { id: purchaseId },
+        data: { status: 'COMPLETED' }
+    });
+    
+    return NextResponse.json(updated);
+}
+Bước 3: Tạo trang Thanh toán (Checkout) với VietQR
+Khi người dùng bấm mua, họ sẽ được đưa đến trang này. Chúng ta sẽ dùng API của vietqr.io để tạo ảnh QR tự động.
+
+Tạo thư mục src/app/checkout/[id] và file page.js.
+
+Lưu ý: Bạn hãy thay đổi BANK_ID và ACCOUNT_NO thành tài khoản thật của bạn để test quét QR.
+
+JavaScript
+
+// src/app/checkout/[id]/page.js
+'use client';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function CheckoutPage({ params }) {
+  const router = useRouter();
+  const [product, setProduct] = useState(null);
+  const [purchase, setPurchase] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  // THÔNG TIN TÀI KHOẢN NHẬN TIỀN (SỬA LẠI CỦA BẠN)
+  const BANK_ID = "MB"; // Ví dụ: MB, VCB, ACB, TPB...
+  const ACCOUNT_NO = "0000123456789"; // Số tài khoản của bạn
+  const ACCOUNT_NAME = "NGUYEN VAN A"; // Tên chủ tài khoản
+
+  useEffect(() => {
+    // 1. Lấy thông tin sản phẩm
+    fetch(`/api/products/${params.id}`).then(res => res.json()).then(data => setProduct(data));
+    
+    // 2. Tạo đơn hàng (Purchase Record) ngay khi vào trang
+    fetch('/api/purchase', {
+        method: 'POST',
+        body: JSON.stringify({ productId: params.id })
+    }).then(res => res.json()).then(data => setPurchase(data));
+  }, [params.id]);
+
+  const handleConfirmPayment = async () => {
+    if (!purchase) return;
+    setLoading(true);
+    
+    // Gọi API cập nhật trạng thái thành COMPLETED
+    // (Thực tế: Bước này phải do Admin duyệt hoặc Bot check ngân hàng tự động)
+    await fetch('/api/purchase', {
+        method: 'PUT',
+        body: JSON.stringify({ purchaseId: purchase.id })
+    });
+
+    alert("Thanh toán thành công! Bạn có thể tải code ngay.");
+    router.push(`/product/${params.id}`); // Quay về trang sản phẩm
+  };
+
+  if (!product || !purchase) return <div className="p-10 text-white bg-gray-900 h-screen">Đang tạo đơn hàng...</div>;
+
+  // Link tạo QR Code tự động (theo chuẩn VietQR)
+  // Cú pháp nội dung chuyển khoản: MUA [Mã đơn hàng]
+  const qrUrl = `https://img.vietqr.io/image/${BANK_ID}-${ACCOUNT_NO}-compact2.jpg?amount=${product.price}&addInfo=MUA ${purchase.id.substring(0,8)}&accountName=${ACCOUNT_NAME}`;
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+      <div className="max-w-4xl w-full bg-gray-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row border border-gray-700">
+        
+        {/* Cột trái: Thông tin QR */}
+        <div className="w-full md:w-1/2 p-8 flex flex-col items-center justify-center bg-gradient-to-br from-blue-900 to-gray-900">
+            <h2 className="text-xl font-bold mb-4 text-cyan-400">QUÉT MÃ ĐỂ THANH TOÁN</h2>
+            <div className="bg-white p-2 rounded-lg shadow-lg">
+                <img src={qrUrl} alt="VietQR" className="w-64 h-64 object-contain" />
+            </div>
+            <p className="mt-4 text-sm text-gray-400">Mở App Ngân hàng &rarr; Quét QR</p>
+        </div>
+
+        {/* Cột phải: Thông tin đơn hàng */}
+        <div className="w-full md:w-1/2 p-8 flex flex-col justify-between">
+            <div>
+                <h1 className="text-2xl font-bold mb-2">{product.name}</h1>
+                <div className="h-1 w-20 bg-cyan-500 mb-6"></div>
+                
+                <div className="space-y-4 text-gray-300">
+                    <div className="flex justify-between border-b border-gray-700 pb-2">
+                        <span>Giá trị đơn hàng:</span>
+                        <span className="text-xl font-bold text-white">
+                            {new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(product.price)}
+                        </span>
+                    </div>
+                    <div className="flex justify-between border-b border-gray-700 pb-2">
+                        <span>Mã đơn hàng:</span>
+                        <span className="font-mono text-yellow-400">{purchase.id.substring(0,8)}</span>
+                    </div>
+                    <div className="bg-blue-900/30 p-4 rounded border border-blue-500/30 text-sm">
+                        ⚠️ <strong>Lưu ý:</strong> Nội dung chuyển khoản phải ghi đúng mã đơn hàng để hệ thống tự động kích hoạt.
+                    </div>
+                </div>
+            </div>
+
+            <div className="mt-8">
+                {/* Nút giả lập đã thanh toán (Vì chưa có Bot check bank) */}
+                <button 
+                    onClick={handleConfirmPayment}
+                    disabled={loading}
+                    className="w-full py-3 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg transition shadow-[0_0_15px_rgba(34,197,94,0.4)]"
+                >
+                    {loading ? "Đang xử lý..." : "✅ TÔI ĐÃ CHUYỂN KHOẢN"}
+                </button>
+                <p className="text-xs text-center mt-2 text-gray-500">
+                    *Hệ thống sẽ kiểm tra giao dịch trong giây lát
+                </p>
+            </div>
+        </div>
+      </div>
+    </div>
+  );
+}
