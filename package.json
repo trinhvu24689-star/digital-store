@@ -11,10 +11,10 @@
   },
   "dependencies": {
     "@clerk/nextjs": "latest",
-    "@prisma/client": "latest",
+    "@prisma/client": "5.19.1", 
     "@vercel/blob": "latest",
     "next": "latest",
-    "prisma": "latest",
+    "prisma": "5.19.1",
     "react": "latest",
     "react-dom": "latest"
   }
