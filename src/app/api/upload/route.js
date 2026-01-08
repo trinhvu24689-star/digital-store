@@ -5,8 +5,11 @@ export async function POST(request) {
   const { searchParams } = new URL(request.url);
   const filename = searchParams.get('filename');
 
-  // Upload file lên Vercel Blob Storage
-  // access: 'public' để ai cũng tải được (khách mua hàng)
+  if (!filename) {
+    return NextResponse.json({ error: "Filename is required" }, { status: 400 });
+  }
+
+  // Upload lên Vercel Blob
   const blob = await put(filename, request.body, {
     access: 'public',
   });

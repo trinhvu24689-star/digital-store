@@ -104,6 +104,7 @@ export default function CreateProduct() {
               <div className="relative group">
                 <div className="absolute -inset-1 bg-gradient-to-r from-cyan-400 to-blue-600 rounded-lg blur opacity-25 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
                 <textarea 
+                  spellCheck="false"
                   className="relative w-full p-4 bg-black text-green-400 font-mono text-sm rounded-lg border border-gray-800 focus:outline-none focus:ring-2 focus:ring-cyan-400 h-96 shadow-[0_0_20px_rgba(34,211,238,0.2)]"
                   placeholder="// Paste your code here..."
                   onChange={(e) => setFormData({...formData, sourceCode: e.target.value})}
